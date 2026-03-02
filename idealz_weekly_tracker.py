@@ -36,9 +36,10 @@ STORES = [
     {"name": "Idealz Lanka - Marino Mall","url": "https://www.google.com/maps/place/iDealz+Lanka+-+Marino+Mall/@6.9001796,79.8523305,17z/data=!3m1!4b1!4m6!3m5!1s0x3ae25957ebf8012b:0xe0e160f3a83edd3c!8m2!3d6.9001796!4d79.8523305!16s%2Fg%2F11gr41k7q8?entry=ttu&g_ep=EgoyMDI2MDIxOC4wIKXMDSoASAFQAw%3D%3D", "expected": 1472},
     {"name": "Idealz Lanka - Liberty Plaza","url": "https://www.google.com/maps/place/iDealz+Lanka+Pvt+Ltd/@6.9116839,79.8515051,17z/data=!3m1!4b1!4m6!3m5!1s0x3ae25911b0316acb:0xdd0d30f303baddf1!8m2!3d6.9116839!4d79.8515051!16s%2Fg%2F11b6dg62r6?entry=ttu&g_ep=EgoyMDI2MDIxOC4wIKXMDSoASAFQAw%3D%3D", "expected": 1881},
 ]
-# How many recent reviews to scrape each week (newest first)
-# 100 per store is enough to catch any new reviews in a week
-SCRAPE_LIMIT   = 150
+# Maximum reviews to scrape as a safety fallback (prevents infinite loops)
+MAX_SAFETY_LIMIT = 500
+# Target age: We stop when we see reviews older than 1 week
+STOP_AGE_MARKERS = ["a week ago", "2 weeks ago", "3 weeks ago", "4 weeks ago", "month", "year"]
 SNAPSHOT_DIR   = Path("snapshots")
 TODAY          = datetime.today().strftime("%Y-%m-%d")
 OUTPUT_XLSX    = f"weekly_report_{TODAY}.xlsx"
@@ -95,9 +96,16 @@ def arrow(val):
     if val > 0:                  return f"▲ +{val}", C["up"]
     return f"▼ {val}",           C["down"]
 
-# ── SCRAPER (lightweight — newest only) ───────────────────────────────────────
+# ── SCRAPER (Time-Based — Newest only) ───────────────────────────────────────
 
-def scrape_newest(limit=SCRAPE_LIMIT):
+def is_older_than_one_week(date_str):
+    """Return True if the date string indicates a review older than ~7-10 days."""
+    if not date_str: return False
+    ds = date_str.lower()
+    # If it says "2 weeks ago", "3 weeks ago", "a month ago", "a year ago" etc.
+    return any(marker in ds for marker in STOP_AGE_MARKERS)
+
+def scrape_newest(safety_limit=MAX_SAFETY_LIMIT):
     """Scrape only the most recent reviews for each store."""
     try:
         from playwright.sync_api import sync_playwright
@@ -131,11 +139,11 @@ def scrape_newest(limit=SCRAPE_LIMIT):
             except: pass
 
         for store in STORES:
-            print(f"\n  Scraping (newest {limit}): {store['name']}")
+            print(f"\n  Scraping (searching for brand new reviews): {store['name']}")
             try:
-                reviews = scrape_store_newest(page, store, limit)
+                reviews = scrape_store_newest(page, store, safety_limit)
+                print(f"  [OK] Collected {len(reviews)} reviews (stopped at older date boundary)")
                 all_reviews.extend(reviews)
-                print(f"  ✓ Got {len(reviews)} recent reviews")
             except Exception as e:
                 print(f"  X Failed: {e}")
             page.wait_for_timeout(3000)
@@ -198,7 +206,20 @@ def scrape_store_newest(page, store, limit):
     page.wait_for_timeout(2000)
 
     while stall < 20:
-        # Scroll FIRST, then check — fixes the "10 reviews stuck" issue
+        # Check current dates in DOM to see if we can stop
+        dates = page.evaluate("""() =>
+            Array.from(document.querySelectorAll('.rsqaWe, .dehysf, .xRkPPb'))
+                 .map(el => el.innerText.trim()).filter(Boolean)
+        """)
+
+        # If any date in the current view is older than 1 week, we hit our target
+        found_old = any(is_older_than_one_week(d) for d in dates)
+
+        if found_old:
+            print(f"\n    [OK] Reached older review boundary (found reviews older than 1 week).")
+            break
+
+        # Scroll FIRST, then check
         page.evaluate("""() => {
             const selectors = [
                 'div[role="feed"]',
@@ -231,7 +252,7 @@ def scrape_store_newest(page, store, limit):
         print(f"    {len(seen_ids)} / {limit} unique reviews loaded...", end="\r", flush=True)
 
         if len(seen_ids) >= limit:
-            print(f"\n    ✓ Target reached ({limit}).")
+            print(f"\n    [OK] Target reached ({limit}).")
             break
 
         if not new_ids:
@@ -240,7 +261,7 @@ def scrape_store_newest(page, store, limit):
             stall = 0
 
     if stall >= 20:
-        print(f"\n    ✓ No more reviews loading. Final: {len(seen_ids)}")
+        print(f"\n    [OK] No more reviews loading. Final: {len(seen_ids)}")
     print(f"    {len(seen_ids)} unique IDs found")
 
     # Expand truncated text
@@ -296,7 +317,10 @@ def scrape_store_newest(page, store, limit):
             })
         except: continue
 
-    return reviews[:limit]
+    # Filter to strictly include only reviews within the target age
+    filtered_reviews = [r for r in reviews if not is_older_than_one_week(r.get("date_raw"))]
+    
+    return filtered_reviews[:limit]
 
 # ── SNAPSHOT MANAGEMENT ───────────────────────────────────────────────────────
 
@@ -305,7 +329,7 @@ def save_snapshot(reviews):
     path = SNAPSHOT_DIR / f"reviews_{TODAY}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(reviews, f, ensure_ascii=False, indent=2)
-    print(f"  ✓ Snapshot saved: {path}")
+    print(f"  [OK] Snapshot saved: {path}")
     return path
 
 def load_previous_snapshot():
@@ -321,7 +345,7 @@ def load_previous_snapshot():
     date_str = latest.stem.replace("reviews_", "")
     with open(latest, "r", encoding="utf-8") as f:
         data = json.load(f)
-    print(f"  ✓ Previous snapshot loaded: {latest} ({len(data)} reviews)")
+    print(f"  [OK] Previous snapshot loaded: {latest} ({len(data)} reviews)")
     return data, date_str
 
 def load_all_snapshots():
@@ -423,7 +447,7 @@ def write_weekly_report(current, previous, prev_date, all_snapshots):
     write_alerts(wb, new_reviews)
 
     wb.save(OUTPUT_XLSX)
-    print(f"  ✓ Report saved: {OUTPUT_XLSX}")
+    print(f"  [OK] Report saved: {OUTPUT_XLSX}")
 
 
 def write_weekly_summary(wb, current, previous, new_reviews, prev_date, all_snapshots):
@@ -461,7 +485,7 @@ def write_weekly_summary(wb, current, previous, new_reviews, prev_date, all_snap
         # New reviews badge
         ws.merge_cells(start_row=ROW+1, start_column=c1, end_row=ROW+1, end_column=c1+3)
         badge = ws.cell(ROW+1, c1)
-        badge.value = f"🆕  {len(new_s)} new review{'s' if len(new_s)!=1 else ''} this week"
+        badge.value = f"[NEW]  {len(new_s)} new review{'s' if len(new_s)!=1 else ''} this week"
         badge.font  = Font(name="Arial", size=11, bold=True,
                            color="1E5631" if new_s else "888888")
         badge.fill  = PatternFill("solid", start_color="E8F5E9" if new_s else "F5F5F5")
@@ -758,7 +782,7 @@ def write_alerts(wb, new_reviews):
 
     if not critical and not negative_sentiment:
         ws.merge_cells("A3:G3")
-        ws["A3"].value = "✅  No new negative reviews this week. Great job!"
+        ws["A3"].value = "[OK]  No new negative reviews this week. Great job!"
         ws["A3"].font  = Font(name="Arial", size=13, bold=True, color="1E5631")
         ws["A3"].alignment = Alignment(horizontal="center")
         ws["A3"].fill  = PatternFill("solid", start_color=C["lgreen"])
@@ -777,7 +801,7 @@ def main():
 
     # 1. Scrape newest reviews
     print("\n[1/4] Scraping newest reviews...")
-    current = scrape_newest(SCRAPE_LIMIT)
+    current = scrape_newest(MAX_SAFETY_LIMIT)
     if not current:
         print("  X No reviews scraped. Check your store URLs.")
         return
@@ -802,7 +826,7 @@ def main():
     write_weekly_report(current, previous, prev_date, all_snapshots)
 
     print(f"\n{'='*60}")
-    print(f"  ✅  DONE")
+    print(f"  [DONE]")
     print(f"  Report: {OUTPUT_XLSX}")
     print(f"  Snapshot: snapshots/reviews_{TODAY}.json")
     if previous:
