@@ -29,6 +29,11 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.utils import get_column_letter
 
+from fpdf import FPDF
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import io
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 STORES = [
@@ -43,6 +48,7 @@ STOP_AGE_MARKERS = ["a week ago", "2 weeks ago", "3 weeks ago", "4 weeks ago", "
 SNAPSHOT_DIR   = Path("snapshots")
 TODAY          = datetime.today().strftime("%Y-%m-%d")
 OUTPUT_XLSX    = f"weekly_report_{TODAY}.xlsx"
+OUTPUT_PDF     = f"weekly_report_{TODAY}.pdf"
 
 # ── COLOURS ───────────────────────────────────────────────────────────────────
 C = {
@@ -447,7 +453,13 @@ def write_weekly_report(current, previous, prev_date, all_snapshots):
     write_alerts(wb, new_reviews)
 
     wb.save(OUTPUT_XLSX)
-    print(f"  [OK] Report saved: {OUTPUT_XLSX}")
+    print(f"  [OK] Excel Report saved: {OUTPUT_XLSX}")
+
+    # Generate PDF Report
+    try:
+        write_pdf_report(current, previous, prev_date, all_snapshots)
+    except Exception as e:
+        print(f"  [!] PDF Generation failed: {e}")
 
 
 def write_weekly_summary(wb, current, previous, new_reviews, prev_date, all_snapshots):
@@ -790,6 +802,214 @@ def write_alerts(wb, new_reviews):
 
     section("🔴  LOW STAR RATINGS  (1–2 Stars)",   critical,           "9C0006")
     section("🟡  NEGATIVE SENTIMENT (3–5 Stars)",  negative_sentiment, "7D6608")
+
+
+
+# ── PDF REPORT ────────────────────────────────────────────────────────────────
+
+class PDFReport(FPDF):
+    def header(self):
+        # Navy blue header bar
+        self.set_fill_color(31, 56, 100) # C["navy"] approx
+        self.rect(0, 0, 210, 30, 'F')
+        
+        self.set_font("helvetica", "B", 16)
+        self.set_text_color(255, 255, 255)
+        self.cell(0, 10, clean_text("IDEALZ - WEEKLY REVIEW REPORT"), ln=True, align='C')
+        
+        self.set_font("helvetica", "I", 10)
+        self.cell(0, 10, clean_text(f"Week ending: {TODAY}"), ln=True, align='C')
+        self.ln(12)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("helvetica", "I", 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f"Page {self.page_no()} / {{nb}}", align='C')
+
+    def chapter_title(self, label, bg=(26, 79, 138)):
+        self.set_font("helvetica", "B", 12)
+        self.set_fill_color(*bg)
+        self.set_text_color(255, 255, 255)
+        self.cell(0, 10, clean_text(f"  {label}"), ln=True, align='L', fill=True)
+        self.ln(4)
+
+    def kpi_box(self, x, y, label, value, diff, higher_is_better=True):
+        # Draw a smaller KPI card to fit 5 per line
+        width = 36
+        height = 20
+        self.set_xy(x, y)
+        self.set_fill_color(245, 248, 252) # lgray-ish
+        self.rect(x, y, width, height, 'F')
+        
+        self.set_font("helvetica", "", 8)
+        self.set_text_color(80, 80, 80)
+        self.text(x + 2, y + 5, clean_text(label))
+        
+        self.set_font("helvetica", "B", 12)
+        self.set_text_color(20, 20, 20)
+        self.text(x + 2, y + 14, clean_text(str(value)))
+        
+        if diff is not None:
+            # Arrow logic
+            self.set_font("helvetica", "B", 8)
+            if diff == 0:
+                self.set_text_color(100, 100, 100)
+                txt = "-"
+            elif (diff > 0 and higher_is_better) or (diff < 0 and not higher_is_better):
+                self.set_text_color(30, 120, 30) # Green
+                txt = f"+{abs(diff)}" if diff > 0 else f"-{abs(diff)}"
+            else:
+                self.set_text_color(180, 30, 30) # Red
+                txt = f"+{abs(diff)}" if diff > 0 else f"-{abs(diff)}"
+            self.text(x + 22, y + 14, clean_text(txt))
+
+def clean_text(text):
+    """Remove or replace characters that FPDF's standard fonts can't handle."""
+    if not text: return ""
+    # Standard fonts only support latin-1. Emojis and special dashes (like em-dash) fail.
+    # Replace common special characters that we know might be there
+    text = str(text).replace("\u2014", "-").replace("\u2013", "-").replace("\u2022", "*")
+    # Encode to latin-1 and replace unknown chars with '?'
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+def write_pdf_report(current, previous, prev_date, all_snapshots):
+    pdf = PDFReport()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+    
+    # ── 1. Executive Summary ──
+    new_reviews = find_new_reviews(current, previous)
+    pdf.chapter_title("EXECUTIVE SUMMARY")
+    
+    summary_text = (f"This report summarizes Google Review performance for the week ending {TODAY}. "
+                    f"A total of {len(new_reviews)} new reviews were detected across all stores since {prev_date or 'the last run'}. "
+                    f"The current total snapshot contains {len(current)} reviews.")
+    pdf.set_font("helvetica", "", 10)
+    pdf.set_text_color(0, 0, 0)
+    pdf.multi_cell(0, 5, clean_text(summary_text))
+    pdf.ln(5)
+    
+    # Quick Count Table
+    pdf.set_font("helvetica", "B", 9)
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(80, 7, clean_text(" Store Name"), border=1, fill=True)
+    pdf.cell(40, 7, clean_text(" New Reviews"), border=1, fill=True, align='C')
+    pdf.cell(40, 7, clean_text(" Total Reviews"), border=1, fill=True, align='C')
+    pdf.ln()
+    
+    pdf.set_font("helvetica", "", 9)
+    for s in STORES:
+        sname = s["name"]
+        n_count = len([r for r in new_reviews if r["store"] == sname])
+        t_count = len([r for r in current     if r["store"] == sname])
+        pdf.cell(80, 6, clean_text(f" {sname}"), border=1)
+        pdf.cell(40, 6, clean_text(str(n_count)), border=1, align='C')
+        pdf.cell(40, 6, clean_text(str(t_count)), border=1, align='C')
+        pdf.ln()
+
+    pdf.ln(10)
+
+    # ── 2. Store KPI Cards ──
+    pdf.chapter_title("STORE PERFORMANCE METRICS")
+    
+    stores = [s["name"] for s in STORES]
+    for i, sname in enumerate(stores):
+        # Check for page break before store section if near bottom
+        if pdf.get_y() > 240:
+            pdf.add_page()
+            
+        curr_s = [r for r in current     if r["store"] == sname]
+        prev_s = [r for r in (previous or []) if r["store"] == sname]
+        cs = store_stats(curr_s)
+        ps = store_stats(prev_s)
+        
+        # Section Header for Store
+        pdf.set_font("helvetica", "B", 11)
+        pdf.set_text_color(31, 78, 121)
+        pdf.cell(0, 8, clean_text(sname), ln=True)
+        
+        y_cards = pdf.get_y()
+        # Avg Rating
+        diff_rat = round(cs["avg_rating"] - ps["avg_rating"], 2) if ps["avg_rating"] else None
+        pdf.kpi_box(10, y_cards, "Rating", cs["avg_rating"], diff_rat)
+        
+        # Pos %
+        diff_pos = round(cs["pos_pct"] - ps["pos_pct"], 1) if ps["pos_pct"] else None
+        pdf.kpi_box(48, y_cards, "% Positive", f"{cs['pos_pct']}%", diff_pos)
+
+        # Neg %
+        diff_neg = round(cs["neg_pct"] - ps["neg_pct"], 1) if ps["neg_pct"] else None
+        pdf.kpi_box(86, y_cards, "% Negative", f"{cs['neg_pct']}%", diff_neg, higher_is_better=False)
+
+        # Reply %
+        diff_rep = round(cs["reply_pct"] - ps["reply_pct"], 1) if ps["reply_pct"] else None
+        pdf.kpi_box(124, y_cards, "Reply Rate", f"{cs['reply_pct']}%", diff_rep)
+        
+        # Period Review Counts (New / Total)
+        new_store_count = len([r for r in new_reviews if r["store"] == sname])
+        counts_str = f"{new_store_count} / {len(curr_s)}"
+        pdf.kpi_box(162, y_cards, "New/Total", counts_str, None)
+        
+        pdf.set_y(y_cards + 25)
+        
+    pdf.ln(10)
+
+    # ── 3. Critical Reviews (This Week Only) ──
+    weekly_critical = []
+    for r in new_reviews:
+        rat = r.get("rating")
+        try: rat_int = int(rat) if rat is not None else 5
+        except: rat_int = 5
+        if rat_int <= 3:
+            weekly_critical.append(r)
+
+    print(f"  Critical reviews this week: {len(weekly_critical)}")
+
+    if weekly_critical:
+        # Only add page if we have content and we're not already at a fresh page
+        if pdf.get_y() > 100:
+            pdf.add_page()
+            
+        pdf.chapter_title("CRITICAL REVIEWS DETECTED THIS WEEK (1-3 STARS)")
+        
+        for r in weekly_critical:
+            if pdf.get_y() > 250: pdf.add_page()
+            
+            rat = int(r.get("rating", 3))
+            pdf.set_font("helvetica", "B", 9)
+            pdf.set_fill_color(255, 235, 235) if rat <= 2 else pdf.set_fill_color(255, 252, 235)
+            
+            header = f"{r.get('store', 'Unknown')} | {rat} Stars | {r.get('author', 'Anon')} | {r.get('date_raw', 'N/A')}"
+            pdf.cell(0, 7, clean_text(header), ln=True, fill=True)
+            
+            pdf.set_font("helvetica", "", 9)
+            text = r.get('text', '')[:1000]
+            if len(r.get('text','')) > 1000: text += "..."
+            pdf.multi_cell(0, 5, clean_text(text))
+            
+            reply = r.get("owner_reply", "").strip()
+            if not reply:
+                pdf.set_font("helvetica", "B", 8)
+                pdf.set_text_color(200, 0, 0)
+                pdf.cell(0, 5, "  X NO OWNER REPLY", ln=True)
+                pdf.set_text_color(0, 0, 0)
+            else:
+                pdf.set_font("helvetica", "I", 8)
+                pdf.set_text_color(80, 80, 80)
+                pdf.set_x(15)
+                pdf.multi_cell(0, 4, clean_text(f"Reply: {reply[:300]}..."))
+                pdf.set_text_color(0, 0, 0)
+            pdf.ln(4)
+    else:
+        # Don't add a page for the empty state message
+        pdf.ln(5)
+        pdf.set_font("helvetica", "B", 12)
+        pdf.set_text_color(30, 120, 30)
+        pdf.cell(0, 10, clean_text("Perfect Score! No new critical reviews found this week."), ln=True, align='C')
+
+    pdf.output(OUTPUT_PDF)
+    print(f"  [OK] PDF Report saved: {OUTPUT_PDF}")
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
