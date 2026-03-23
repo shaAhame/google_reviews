@@ -931,8 +931,8 @@ def write_pdf_report(current, previous, prev_date, all_snapshots):
         
         y_cards = pdf.get_y()
         # Avg Rating
-        diff_rat = round(cs["avg_rating"] - ps["avg_rating"], 2) if ps["avg_rating"] else None
-        pdf.kpi_box(10, y_cards, "Rating", cs["avg_rating"], diff_rat)
+        diff_rat = round(cs["avg_rating"] - ps["avg_rating"], 2) if cs["avg_rating"] is not None and ps["avg_rating"] is not None else None
+        pdf.kpi_box(10, y_cards, "Rating", cs["avg_rating"] if cs["avg_rating"] is not None else "N/A", diff_rat)
         
         # Pos %
         diff_pos = round(cs["pos_pct"] - ps["pos_pct"], 1) if ps["pos_pct"] else None
@@ -978,7 +978,8 @@ def write_pdf_report(current, previous, prev_date, all_snapshots):
             
             rat = int(r.get("rating", 3))
             pdf.set_font("helvetica", "B", 9)
-            pdf.set_fill_color(255, 235, 235) if rat <= 2 else pdf.set_fill_color(255, 252, 235)
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_fill_color(255, 180, 180) if rat <= 2 else pdf.set_fill_color(255, 230, 150)
             
             header = f"{r.get('store', 'Unknown')} | {rat} Stars | {r.get('author', 'Anon')} | {r.get('date_raw', 'N/A')}"
             pdf.cell(0, 7, clean_text(header), ln=True, fill=True)
